@@ -14,7 +14,7 @@ envParams = {
     "C": 3,
     "veh_length": 5,
     "headway": 3,
-    "Q": np.array([35, 35, 35, 35])*6/8,
+    "Q": np.random.poisson(26.25, size=(1, 4)),
     "step_size": 0.05,
     "boundary": 250,
     "eta": np.array([[0.0, 0.0, 5/7, 2/7],
