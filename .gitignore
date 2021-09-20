@@ -6,6 +6,13 @@ __pycache__/
 # C extensions
 *.so
 
+# PyCharm Files
+.idea/
+
+# Video Files
+*
+*.mp4
+
 # Distribution / packaging
 .Python
 build/
