@@ -7,9 +7,10 @@ from operator import add
 import matplotlib.animation as animation
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 import pickle
+import gym
 
 
-class Env():
+class Env(gym.Env):
 
     def __init__(self, envParams):
         self.slots = []
@@ -88,7 +89,6 @@ class Env():
                 des = np.random.choice([0, 1, 2, 3], p = self.eta[i])
                 self.approaching_vehicles[i].append(Vehicle(x, y, 0, d))
                 self.approaching_vehicles[i][-1].generate_approach_seq(i, des)
-
 
     def step(self):
         self.num_step += 1
@@ -237,7 +237,10 @@ class Env():
             mask = [ veh.v < 3 and veh.d > 75 for veh in self.approaching_vehicles[i]]
             self.queue_length[i] = sum(mask)
 
-        
+    def render(self):
+        # This function is required to be implemented by the OpenAI Gym Env class, but we already have animation
+        # functions below that will operate independently
+        pass
 
     def ani_save(self, fig, steps, f_name):
         
@@ -371,7 +374,7 @@ class Env():
                     loc=3)                       # loc=lower left corner
         rec2_ax.set_xlim(1-self.rec_steps, 0)
         rec2_ax.set_ylim(-1, 1)
-        rec2_ax.set_ylabel("Speed\nerros (m/s)")
+        rec2_ax.set_ylabel("Speed\nerrors (m/s)")
         rec2_ax.set_xlabel("Steps (0 is current step)")
         self.rec2_handler = rec2_ax.plot([1, 2], np.zeros((2, 12)))
 
