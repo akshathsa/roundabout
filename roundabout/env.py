@@ -1,4 +1,5 @@
 import numpy as np
+
 from .utils import IDMController, adjust_a, direction_xy, isFeasible, next_a
 from .vehicle import Vehicle, VirtualVihicle
 from .slot import Slot
@@ -8,6 +9,7 @@ import matplotlib.animation as animation
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 import pickle
 import gym
+from gym import spaces
 
 
 class Env(gym.Env):
@@ -40,7 +42,7 @@ class Env(gym.Env):
         self.k_omega = 10
         self.k_theta = 10
         self.records = {
-            "theta": np.zeros((1, self.numSlots)), 
+            "theta": np.zeros((1, self.numSlots)),
             "omega": np.zeros((1, self.numSlots))
         }
         self.eta = envParams["eta"]
@@ -72,10 +74,34 @@ class Env(gym.Env):
         self.fifo = envParams["fifo"]
         if self.fifo:
             self.P = np.ones(4)
-        
+
         self.throughput = 0
 
+        # Store envParams within so it can be reset from this attribute instead of having to load it from compare again.
+        # When the constructor is used by compare.py, it passes this dict directly, but the reset method calls this
+        # __init__ method, so it needs to supply envParams again. It can do this by accessing compare.py which can lead
+        # to circular imports, or by storing it here, it can pass its own attribute to this and preserve it.
+        self.envParams = envParams
+
+        self.steps_left = 2400
+
+        # Set up action and observation spaces
+        # The action space is made up of the 4 merge-in probabilities, each ranging from 0-1
+        self.action_space = spaces.Box(low=np.array([0, 0, 0, 0]), high=np.array([1, 1, 1, 1]))
+
+        # The observation space, as of now is made up of the information from approaching_vehicles and Q
+        observation_spaces = {
+            "approaching_vehicles": spaces.Box(low=np.array([0, 0, 0, 0]), high=np.array([20, 20, 20, 20])),
+            "Q": spaces.Box(low=np.array([0, 0, 0, 0]), high=np.array([3, 3, 3, 3]))
+        }
+
+        self.observation_space = spaces.Dict(observation_spaces)
+
     def initialize(self, initParams):
+        # Store initParams here so it can be accessed from within the class in the future after resetting, similar to
+        # how envParams was stored in __init__
+        self.initParams = initParams
+
         # initial slots
         for i in range(self.numSlots):
             theta = 4/3*np.pi - i/self.numSlots*np.pi*2
@@ -86,17 +112,24 @@ class Env(gym.Env):
             for j in range(initParams["l_0"][i]):
                 x, y = direction_xy[i]((self.stop_line + (j+1)*self.slot_length, 0))
                 d = self.boundary - (self.stop_line + (j+1)*self.slot_length)
-                des = np.random.choice([0, 1, 2, 3], p = self.eta[i])
+                des = np.random.choice([0, 1, 2, 3], p=self.eta[i])
                 self.approaching_vehicles[i].append(Vehicle(x, y, 0, d))
                 self.approaching_vehicles[i][-1].generate_approach_seq(i, des)
 
-    def step(self):
+    def step(self, updated_P=None):
         self.num_step += 1
+
+        # The RL Agent (if used) will consider the observation and take an action in the action space which will be an
+        # updated P array. This will be passed in as a parameter to this step method.
+        # FIXME: a default value of None is passed for this since existing animation functions haven't been integrated
+        #  with the learning and have no updated value to pass to this method. In that case, we don't change self.P
+        if updated_P is not None:
+            self.P = updated_P
 
         # Q->approaching queues 
         if np.mod(self.num_step, self.approaching_steps) == 0:
             for i in range(4):
-                if np.random.poisson(self.Q[i]/60*self.approaching_steps*self.step_size):
+                if np.random.poisson(self.Q[i]*self.approaching_steps):
                     x, y = direction_xy[i]([self.boundary, 0])
                     if len(self.approaching_vehicles[i]) > 0 and self.approaching_vehicles[i][-1].d < self.slot_length:
                         x, y = direction_xy[i]([self.approaching_vehicles[i][-1].d - self.slot_length, 0])
@@ -119,7 +152,7 @@ class Env(gym.Env):
 
                 a = self.idm.get_accel(veh, preceding_veh)
                 veh.update(a, self.step_size, i, self.boundary, self.R)
-                
+
         # vehicles in adjusting_vehicles follow function
         for i in range(4):
             for veh in self.adjusting_vehicles[i]:
@@ -133,9 +166,9 @@ class Env(gym.Env):
                         self.adjusting_vehicles[i].remove(veh)
                         self.platooning_vehicles[i].append(veh)
                         self.virtual_vehicles.append(
-                            VirtualVihicle(veh, 
+                            VirtualVihicle(veh,
                                            np.mod(np.pi/2 * i + np.pi/6 - \
-                                                  (self.boundary - np.sqrt(3)*self.R + np.pi/3*self.R - veh.d)/self.R, 2*np.pi), 
+                                                  (self.boundary - np.sqrt(3)*self.R + np.pi/3*self.R - veh.d)/self.R, 2*np.pi),
                                            self.v/self.R))
                         veh.slot.virtual_vehicle = self.virtual_vehicles[-1]
                         veh.slot.veh.remove(veh)
@@ -159,7 +192,7 @@ class Env(gym.Env):
 
             # v_veh.angular_a = -self.k_omega * (v_veh.omega - self.v/self.R) - self.k_theta * delta
             # v_veh.update(self.step_size)
-            
+
             # delta = v_veh.theta - v_veh.veh.slot.theta
             # if delta > np.pi:
             #     delta = delta - 2*np.pi
@@ -180,7 +213,7 @@ class Env(gym.Env):
                               -self.k_theta * (2*sample["theta"][i] - sample["theta"][pre_i] - sample["theta"][follow_i])
             v_veh.angular_a = min(max(v_veh.angular_a, -self.a), self.a)
             v_veh.update(self.step_size)
-            
+
             delta = v_veh.theta - v_veh.veh.slot.theta
             if delta > np.pi:
                 delta = delta - 2*np.pi
@@ -237,13 +270,52 @@ class Env(gym.Env):
             mask = [ veh.v < 3 and veh.d > 75 for veh in self.approaching_vehicles[i]]
             self.queue_length[i] = sum(mask)
 
+        # Calculate reward based on the number of cars still waiting in the queue
+        # maximum is the max value the reward for this step can take (for example 1)
+        # coeff is the coefficient multiplied by the queue length before the product is squared.
+        coeff = 0.05
+        maximum = 1
+        reward = maximum - (coeff * self.queue_length[0]) ** 2 - (coeff * self.queue_length[1]) ** 2 \
+                 - (coeff * self.queue_length[2]) ** 2 - (coeff * self.queue_length[3]) ** 2
+
+        # Determine whether done. Once steps left has reached 0, we have completed the specified number of steps
+        self.steps_left -= 1
+        if self.steps_left <= 0:
+            done = True
+        else:
+            done = False
+
+        # Randomize Q
+        # Put together the initial Q (incoming flow). This will be a time-based function. To approximate this behavior,
+        # at each time step, we use a uniform distribution to get a baseline value and then add randomized noise based
+        # on a normal distribution. We use this as the mean to a Poisson distribution to get the Qi's. This way, our
+        # lambda isn't static.
+        baselines = np.random.uniform(25, 41, 4)
+        incoming_flows = np.array([0.0, 0.0, 0.0, 0.0])
+        for x in range(len(baselines)):
+            baselines[x] += np.random.normal(0, 3)
+            incoming_flows[x] = np.random.poisson(baselines[x]) / 60 * self.step_size
+
+        # The flow should be first divided by 60 to get incoming flow per minute and then multiplied by the step_size
+        # to get an approximate incoming number of vehicles this time step
+        self.Q = incoming_flows
+
+        # Return the next observation, reward, and a boolean to represent whether we are done
+        return {'approaching_vehicles': self.approaching_vehicles, 'Q': self.Q}, reward, done, {}
+
+    def reset(self):
+        # Function resets the state of the simulator
+        self.__init__(envParams=self.envParams)
+        self.initialize(self.initParams)
+        return {'approaching_vehicles': self.approaching_vehicles, 'Q': self.Q}
+
     def render(self):
         # This function is required to be implemented by the OpenAI Gym Env class, but we already have animation
         # functions below that will operate independently
         pass
 
     def ani_save(self, fig, steps, f_name):
-        
+
         ax = fig.add_subplot(111, autoscale_on=False, xlim=(-self.boundary/2, self.boundary), ylim=(-self.boundary/2, self.boundary))
 
         self.animate_init(ax)
@@ -258,7 +330,7 @@ class Env(gym.Env):
         ax.plot(np.linspace(np.sqrt(3)*self.R, self.boundary, 100), np.zeros(100), markersize=0, c='k')
         ax.plot(np.zeros(100), np.linspace(-self.boundary, -np.sqrt(3)*self.R, 100), markersize=0, c='k')
         ax.plot(np.zeros(100), np.linspace(np.sqrt(3)*self.R, self.boundary, 100), markersize=0, c='k')
-        
+
         ax.plot(np.cos(np.linspace(0, 2*np.pi, 100))*self.R, np.sin(np.linspace(0, 2*np.pi, 100))*self.R, markersize=0, c='k')
         ax.plot((np.sqrt(3)+np.cos(np.linspace(7/6*np.pi, 3/2*np.pi, 100)))*self.R, (1+np.sin(np.linspace(7/6*np.pi, 3/2*np.pi, 100)))*self.R, markersize=0, c='k')
         ax.plot((np.sqrt(3)+np.cos(np.linspace(7/6*np.pi, 3/2*np.pi, 100)))*self.R, -(1+np.sin(np.linspace(7/6*np.pi, 3/2*np.pi, 100)))*self.R, markersize=0, c='k')
@@ -285,12 +357,12 @@ class Env(gym.Env):
                     loc=3)                       # loc=lower left corner
         sub_ax.set_xlim(-3*self.R, 3*self.R)
         sub_ax.set_ylim(-3*self.R, 3*self.R)
-        
+
         sub_ax.plot(np.linspace(-self.boundary, -np.sqrt(3)*self.R, 100), np.zeros(100), markersize=0, c='k')
         sub_ax.plot(np.linspace(np.sqrt(3)*self.R, self.boundary, 100), np.zeros(100), markersize=0, c='k')
         sub_ax.plot(np.zeros(100), np.linspace(-self.boundary, -np.sqrt(3)*self.R, 100), markersize=0, c='k')
         sub_ax.plot(np.zeros(100), np.linspace(np.sqrt(3)*self.R, self.boundary, 100), markersize=0, c='k')
-        
+
         sub_ax.plot(np.cos(np.linspace(0, 2*np.pi, 100))*self.R, np.sin(np.linspace(0, 2*np.pi, 100))*self.R, markersize=0, c='k')
         sub_ax.plot((np.sqrt(3)+np.cos(np.linspace(7/6*np.pi, 3/2*np.pi, 100)))*self.R, (1+np.sin(np.linspace(7/6*np.pi, 3/2*np.pi, 100)))*self.R, markersize=0, c='k')
         sub_ax.plot((np.sqrt(3)+np.cos(np.linspace(7/6*np.pi, 3/2*np.pi, 100)))*self.R, -(1+np.sin(np.linspace(7/6*np.pi, 3/2*np.pi, 100)))*self.R, markersize=0, c='k')
@@ -306,17 +378,17 @@ class Env(gym.Env):
         self.sub_slot_marker = []
         self.sub_slot_text = []
         for slot in self.slots:
-            temp, = ax.plot(np.array([self.R-1, self.R+1])*np.cos(slot.theta), 
+            temp, = ax.plot(np.array([self.R-1, self.R+1])*np.cos(slot.theta),
                             np.array([self.R-1, self.R+1])*np.sin(slot.theta), markersize=0, c='g')
             self.slot_marker.append(temp)
             # temp = ax.text((self.R+2)*np.cos(slot.theta), 
             #                (self.R+2)*np.sin(slot.theta), "%d" % slot.id, ha='center', va='center')
             # self.slot_text.append(temp)
 
-            temp, = sub_ax.plot(np.array([self.R-1, self.R+1])*np.cos(slot.theta), 
+            temp, = sub_ax.plot(np.array([self.R-1, self.R+1])*np.cos(slot.theta),
                             np.array([self.R-1, self.R+1])*np.sin(slot.theta), markersize=0, c='g')
             self.sub_slot_marker.append(temp)
-            temp = sub_ax.text((self.R+4)*np.cos(slot.theta), 
+            temp = sub_ax.text((self.R+4)*np.cos(slot.theta),
                            (self.R+4)*np.sin(slot.theta), "%d" % slot.id, ha='center', va='center')
             self.sub_slot_text.append(temp)
 
@@ -386,11 +458,11 @@ class Env(gym.Env):
 
         for slot in self.slots:
             i = self.slots.index(slot)
-            self.slot_marker[i].set_data(np.array([self.R-1, self.R+1])*np.cos(slot.theta), 
+            self.slot_marker[i].set_data(np.array([self.R-1, self.R+1])*np.cos(slot.theta),
                                          np.array([self.R-1, self.R+1])*np.sin(slot.theta))
-            self.sub_slot_marker[i].set_data(np.array([self.R-1, self.R+1])*np.cos(slot.theta), 
+            self.sub_slot_marker[i].set_data(np.array([self.R-1, self.R+1])*np.cos(slot.theta),
                                          np.array([self.R-1, self.R+1])*np.sin(slot.theta))
-            self.sub_slot_text[i].set_position(((self.R+4)*np.cos(slot.theta), 
+            self.sub_slot_text[i].set_position(((self.R+4)*np.cos(slot.theta),
                                             (self.R+4)*np.sin(slot.theta)))
 
         # self.slot_marker_1, self.slot_marker_2, self.slot_marker_3, self.slot_marker_4,\
@@ -404,8 +476,8 @@ class Env(gym.Env):
         # self.sub_slot_text_1, self.sub_slot_text_2, self.sub_slot_text_3, self.sub_slot_text_4,\
         # self.sub_slot_text_5, self.sub_slot_text_6, self.sub_slot_text_7, self.sub_slot_text_8,\
         # self.sub_slot_text_9, self.sub_slot_text_10, self.sub_slot_text_11, self.sub_slot_text_12 = self.sub_slot_text
-        
-        
+
+
         # plot vehicles (no exiting vehicles)
         vehicles_x = np.array([])
         vehicles_y = np.array([])
@@ -417,7 +489,7 @@ class Env(gym.Env):
             vehicles_y = np.ones(100)*(self.boundary + 1)
         self.vehicle_dots.set_offsets(np.array([[item[0], item[1]] for item in zip(vehicles_x, vehicles_y)]))
         self.sub_vehicle_dots.set_offsets(np.array([[item[0], item[1]] for item in zip(vehicles_x, vehicles_y)]))
-        
+
 
         # adjusting_info = [("%d"%self.slots.index(veh.slot), (veh.x, veh.y)) \
         #                     for group in self.adjusting_vehicles\
@@ -439,7 +511,7 @@ class Env(gym.Env):
         self.vehicle_exit_dots.set_offsets(np.array([[item[0], item[1]] for item in zip(vehicle_exit_x, vehicle_exit_y)]))
         self.sub_vehicle_exit_dots.set_offsets(np.array([[item[0], item[1]] for item in zip(vehicle_exit_x, vehicle_exit_y)]))
 
-        
+
         rec_steps = min(self.rec_steps, self.num_step)
         if self.num_step > 1:
             for i in range(self.numSlots):
@@ -451,8 +523,8 @@ class Env(gym.Env):
 
         return [item for group in [self.slot_marker, self.sub_slot_marker, self.sub_slot_text,
                                    self.rec_handler, self.adjusting_handler, [
-                                       self.vehicle_dots, self.vehicle_exit_dots, 
-                                       self.sub_vehicle_dots, self.sub_vehicle_exit_dots, 
+                                       self.vehicle_dots, self.vehicle_exit_dots,
+                                       self.sub_vehicle_dots, self.sub_vehicle_exit_dots,
                                        self.queue_text, self.time_text, self.throughput_text
                                    ]] for item in group]
         # return self.slot_marker_1, self.slot_marker_2, self.slot_marker_3, self.slot_marker_4,\
@@ -470,13 +542,13 @@ class Env(gym.Env):
             #    self.vehicle_dots, self.vehicle_exit_dots, self.sub_vehicle_dots, self.sub_vehicle_exit_dots, *(self.adjusting_handler)
 
     def test_plot(self, ax):
-        
+
         # plot the roadways in black
         ax.plot(np.linspace(-self.boundary, -np.sqrt(3)*self.R, 100), np.zeros(100), markersize=0, c='k')
         ax.plot(np.linspace(np.sqrt(3)*self.R, self.boundary, 100), np.zeros(100), markersize=0, c='k')
         ax.plot(np.zeros(100), np.linspace(-self.boundary, -np.sqrt(3)*self.R, 100), markersize=0, c='k')
         ax.plot(np.zeros(100), np.linspace(np.sqrt(3)*self.R, self.boundary, 100), markersize=0, c='k')
-        
+
         ax.plot(np.cos(np.linspace(0, 2*np.pi, 100))*self.R, np.sin(np.linspace(0, 2*np.pi, 100))*self.R, markersize=0, c='k')
         ax.plot((np.sqrt(3)+np.cos(np.linspace(7/6*np.pi, 3/2*np.pi, 100)))*self.R, (1+np.sin(np.linspace(7/6*np.pi, 3/2*np.pi, 100)))*self.R, markersize=0, c='k')
         ax.plot((np.sqrt(3)+np.cos(np.linspace(7/6*np.pi, 3/2*np.pi, 100)))*self.R, -(1+np.sin(np.linspace(7/6*np.pi, 3/2*np.pi, 100)))*self.R, markersize=0, c='k')
@@ -496,10 +568,10 @@ class Env(gym.Env):
         slot_marker = []
 
         for slot in self.slots:
-            temp, = ax.plot(np.array([self.R-1, self.R+1])*np.cos(slot.theta), 
+            temp, = ax.plot(np.array([self.R-1, self.R+1])*np.cos(slot.theta),
                             np.array([self.R-1, self.R+1])*np.sin(slot.theta), markersize=0, c='g')
             slot_marker.append(temp)
-            ax.text(self.R*np.cos(slot.theta), 
+            ax.text(self.R*np.cos(slot.theta),
                     self.R*np.sin(slot.theta), "%s:%s" % (str(slot.id), str(slot.next_approach)))
 
         # plot vehicles (no exiting vehicles)
@@ -514,7 +586,7 @@ class Env(gym.Env):
             vehicles_x = np.ones(100)*(self.boundary + 1)
             vehicles_y = np.ones(100)*(self.boundary + 1)
         vehicle_dots.set_offsets(np.array([[item[0], item[1]] for item in zip(vehicles_x, vehicles_y)]))
-        
+
 
         # plot exiting vehicles with different markers
         vehicle_exit_x = np.array([item.x for item in reduce(add, self.leaving_vehicles)])
